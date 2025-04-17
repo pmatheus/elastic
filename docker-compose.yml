@@ -94,9 +94,11 @@ services:
       - node.name=es01
       - cluster.name=${CLUSTER_NAME:-docker-cluster} # Use CLUSTER_NAME from .env or default
       # - discovery.type=single-node # Removed/Commented out for ES 9.x compatibility
+      - cluster.initial_master_nodes=es01
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD} # Set elastic user password
       - bootstrap.memory_lock=true # Lock memory
       # Security settings
+      - vm.max_map_count=262144
       - xpack.security.enabled=true
       - xpack.security.http.ssl.enabled=true
       - xpack.security.http.ssl.key=certs/es01/es01.key
