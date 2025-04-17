@@ -98,7 +98,6 @@ services:
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD} # Set elastic user password
       - bootstrap.memory_lock=true # Lock memory
       # Security settings
-      - vm.max_map_count=262144
       - xpack.security.enabled=true
       - xpack.security.http.ssl.enabled=true
       - xpack.security.http.ssl.key=certs/es01/es01.key
