@@ -110,7 +110,7 @@ services:
       - xpack.security.transport.ssl.verification_mode=certificate # Verify certs using CA
       - xpack.license.self_generated.type=${LICENSE:-basic} # Set license type (basic/trial)
     cpus: ${ES_CPU_LIMIT} # Optional CPU limit
-    mem_limit: ${ES_MEM_LIMIT:-2g} # Memory limit (adjust as needed)
+    mem_limit: 32g # Memory limit (adjust as needed)
     ulimits:
       memlock:
         soft: -1 # Allow unlimited memory locking
