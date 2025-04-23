@@ -69,6 +69,6 @@ find ${CERTS_DIR} -type d -exec chmod 750 {} \;
 find ${CERTS_DIR} -type f -exec chmod 640 {} \;
 
 
-echo $(ls -l ${CERTS_DIR})
+echo $(du -sh ${CERTS_DIR})
 
 echo "✅ Certificates created and permissions set"

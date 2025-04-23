@@ -179,14 +179,6 @@ services:
     ports:
       # Map host port to container port 8220
       - "${FLEET_PORT}:8220"
-    command: >
-      bash -c '
-      # Run Fleet Server in the foreground, explicitly setting ES host
-      /usr/bin/tini -- /usr/local/bin/docker-entrypoint \
-        -E fleet.agent.id=$(hostname) \
-        -E elasticsearch.hosts=["https://es01:9200"] \
-        fleet-server start
-      '
     environment:
       # Enable enrollment
       - FLEET_ENROLL=1
