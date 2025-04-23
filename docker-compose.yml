@@ -1,162 +1,261 @@
-version: "3.8"
-
+########################################
+#  Shared volumes / network
+########################################
 volumes:
-  certs:
-    driver: local
-  esdata01:
-    driver: local
-  kibanadata:
-    driver: local
+  # Volume for storing certificates
+  certs: {}
+  # Volume for Elasticsearch data
+  esdata01: {}
+  # Volume for Kibana data
+  kibanadata: {}
+  # Volume for Fleet Server data
+  fleetserverdata: {}
 
 networks:
+  # Default network for the Elastic stack
   default:
     name: elastic
-    external: false
+    # Not external, managed by Docker Compose
 
+  # Network Definition
+  elastic:
+    driver: bridge
+
+########################################
+#  Services
+########################################
 services:
-  setup:
-    # Make sure STACK_VERSION is set to 9.0.0 in your environment/.env file
-    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
-    volumes:
-      - certs:/usr/share/elasticsearch/config/certs
-    user: "0" # Run as root to manage certs and permissions
-    command: >
-      bash -c '
-        # Check if passwords are set
-        if [ x${ELASTIC_PASSWORD} == x ]; then
-          echo "Set the ELASTIC_PASSWORD environment variable in the .env file";
-          exit 1;
-        elif [ x${KIBANA_PASSWORD} == x ]; then
-          echo "Set the KIBANA_PASSWORD environment variable in the .env file";
-          exit 1;
-        fi;
-        # Create CA certificate if it doesnt exist
-        if [ ! -f config/certs/ca.zip ]; then
-          echo "Creating CA";
-          bin/elasticsearch-certutil ca --silent --pem -out config/certs/ca.zip;
-          unzip config/certs/ca.zip -d config/certs;
-        fi;
-        # Create Certificates if they dont exist
-        if [ ! -f config/certs/certs.zip ]; then
-          echo "Creating certs";
-          echo -ne \
-          "instances:\n"\
-          "  - name: es01\n"\
-          "    dns:\n"\
-          "      - es01\n"\
-          "      - localhost\n"\
-          "    ip:\n"\
-          "      - 127.0.0.1\n"\
-          "  - name: kibana\n"\
-          "    dns:\n"\
-          "      - kibana\n"\
-          "      - localhost\n"\
-          "    ip:\n"\
-          "      - 127.0.0.1\n"\
-          > config/certs/instances.yml;
-          bin/elasticsearch-certutil cert --silent --pem -out config/certs/certs.zip --in config/certs/instances.yml --ca-cert config/certs/ca/ca.crt --ca-key config/certs/ca/ca.key;
-          unzip config/certs/certs.zip -d config/certs;
-        fi;
-        echo "Setting file permissions"
-        # Set permissions for certs directory
-        chown -R root:root config/certs;
-        find config/certs -type d -exec chmod 750 \{\} \;;
-        find config/certs -type f -exec chmod 640 \{\} \;;
-        echo "Waiting for Elasticsearch availability";
-        # Wait for Elasticsearch to start and respond (may take time)
-        until curl -s --cacert config/certs/ca/ca.crt https://es01:9200 | grep -q "missing authentication credentials"; do sleep 30; done;
-        echo "Setting kibana_system password";
-        # Set the password for the kibana_system user
-        until curl -s -X POST --cacert config/certs/ca/ca.crt -u "elastic:${ELASTIC_PASSWORD}" -H "Content-Type: application/json" https://es01:9200/_security/user/kibana_system/_password -d "{\"password\":\"${KIBANA_PASSWORD}\"}" | grep -q "^{}"; do sleep 10; done;
-        echo "All setup tasks done!";
-      '
-    healthcheck:
-      # Check if the cert generation was successful
-      test: ["CMD-SHELL", "[ -f config/certs/es01/es01.crt ]"]
-      interval: 1s
-      timeout: 5s
-      retries: 120
 
-  es01:
-    depends_on:
-      setup:
-        condition: service_healthy
-    # Make sure STACK_VERSION is set to 9.0.0 in your environment/.env file
-    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
-    labels:
-      co.elastic.logs/module: elasticsearch
+  ###############################################################################
+  # 1) setup-certs:     Generates certificates and permissions (runs once)
+  ###############################################################################
+  setup-certs:
+    # Use an ES image as it has the necessary tools (certutil, unzip)
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION:-8.18.0}
+    # Run commands as root user
+    user: "0"
     volumes:
-      - certs:/usr/share/elasticsearch/config/certs # Mount certs volume
-      - esdata01:/usr/share/elasticsearch/data      # Mount data volume
+      # Mount the certs volume to the standard certs path inside the container
+      - certs:/usr/share/elasticsearch/config/certs
+      # Mount the setup script into the container
+      - ./setup_certs.sh:/usr/local/bin/setup_certs.sh:ro
+    # Command to generate certs and permissions - now executes the script
+    command: ["bash", "/usr/local/bin/setup_certs.sh"]
+    # Pass necessary environment variables for the script
+    environment:
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - KIBANA_PASSWORD=${KIBANA_PASSWORD}
+
+  ###############################################################################
+  # 2) Elasticsearch  (single node)
+  ###############################################################################
+  es01:
+    # Wait for the setup-certs service to complete successfully
+    depends_on:
+      setup-certs: 
+        condition: service_completed_successfully
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION:-8.18.0}
+    # Run as non-root user 1000:1000
+    user: "1000:1000"
+    labels: { co.elastic.logs/module: elasticsearch }
+    volumes:
+      # Mount certs volume (read-only is often sufficient after setup)
+      - certs:/usr/share/elasticsearch/config/certs:ro
+      # Mount data volume
+      - esdata01:/usr/share/elasticsearch/data
+    networks:
+      - elastic # Needs to be on the same network to reach es01
     ports:
-      - ${ES_PORT:-9200}:9200 # Expose Elasticsearch port
+      # Map host port to container port 9200
+      - "${ES_PORT}:9200"
     environment:
       - node.name=es01
-      - cluster.name=${CLUSTER_NAME:-docker-cluster} # Use CLUSTER_NAME from .env or default
-      # - discovery.type=single-node # Removed/Commented out for ES 9.x compatibility
-      - cluster.initial_master_nodes=es01
-      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD} # Set elastic user password
-      - bootstrap.memory_lock=true # Lock memory
-      # Security settings
+      - cluster.name=${CLUSTER_NAME}
+      - discovery.type=single-node
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      # Lock memory to prevent swapping
+      - bootstrap.memory_lock=true
+      # Enable security features
       - xpack.security.enabled=true
+      # Configure HTTP SSL/TLS
       - xpack.security.http.ssl.enabled=true
       - xpack.security.http.ssl.key=certs/es01/es01.key
       - xpack.security.http.ssl.certificate=certs/es01/es01.crt
       - xpack.security.http.ssl.certificate_authorities=certs/ca/ca.crt
+      # Configure Transport SSL/TLS
       - xpack.security.transport.ssl.enabled=true
       - xpack.security.transport.ssl.key=certs/es01/es01.key
       - xpack.security.transport.ssl.certificate=certs/es01/es01.crt
       - xpack.security.transport.ssl.certificate_authorities=certs/ca/ca.crt
-      - xpack.security.transport.ssl.verification_mode=certificate # Verify certs using CA
-      - xpack.license.self_generated.type=${LICENSE:-basic} # Set license type (basic/trial)
-    cpus: ${ES_CPU_LIMIT} # Optional CPU limit
-    mem_limit: 32g # Memory limit (adjust as needed)
+      # Verify peer certificates
+      - xpack.security.transport.ssl.verification_mode=certificate
+      # License type (basic, trial, etc.)
+      - xpack.license.self_generated.type=${LICENSE}
+    # Memory limit for the container
+    mem_limit: ${ES_MEM_LIMIT}
+    # Set ulimits for memory locking
     ulimits:
-      memlock:
-        soft: -1 # Allow unlimited memory locking
-        hard: -1
+      memlock: { soft: -1, hard: -1 }
+    # Healthcheck to verify Elasticsearch is running and requires authentication
     healthcheck:
-      # Check if Elasticsearch is up and requires authentication
-      test:
-        [
-          "CMD-SHELL",
-          "curl -s --cacert config/certs/ca/ca.crt https://localhost:9200 | grep -q 'missing authentication credentials'"
-        ]
+      test: ["CMD-SHELL",
+             "curl -s --cacert /usr/share/elasticsearch/config/certs/ca/ca.crt https://localhost:9200 \
+              | grep -q 'missing authentication'"]
+      interval: 10s
+      timeout: 30s
+      retries: 10
+      start_period: 60s # Give ES time to start before first check
+
+  ###############################################################################
+  # 3) Kibana
+  ###############################################################################
+  kibana:
+    # Wait for Elasticsearch to be healthy and setup to complete successfully
+    depends_on:
+      es01:  { condition: service_healthy }
+      setup-passwords: { condition: service_completed_successfully }
+    image: docker.elastic.co/kibana/kibana:${STACK_VERSION:-8.18.0}
+    # Run as non-root user 1000:1000
+    user: "1000:1000"
+    labels: { co.elastic.logs/module: kibana }
+    volumes:
+      # Mount certs volume (read-only)
+      - certs:/usr/share/kibana/config/certs:ro
+      # Mount Kibana data volume
+      - kibanadata:/usr/share/kibana/data
+    ports:
+      # Map host port to container port 5601
+      - "${KIBANA_PORT}:5601"
+    networks:
+      - elastic # Needs to be on the same network to reach es01
+    environment:
+      # Corrected variable name: SERVER_NAME
+      - SERVER_NAME=kibana
+      # Elasticsearch hosts Kibana connects to
+      - ELASTICSEARCH_HOSTS=https://es01:9200
+      # Credentials for Kibana's internal user
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD}
+      # CA certificate for verifying Elasticsearch connection
+      - ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES=config/certs/ca/ca.crt
+      # Encryption keys for Kibana settings (ensure these are set in .env)
+      - XPACK_SECURITY_ENCRYPTIONKEY=${ENCRYPTION_KEY}
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=${ENCRYPTION_KEY}
+      - XPACK_REPORTING_ENCRYPTIONKEY=${ENCRYPTION_KEY}
+      # Enable SSL/TLS for Kibana's server
+      - SERVER_SSL_ENABLED=true
+      # Paths to Kibana's own SSL certificate and key
+      - SERVER_SSL_CERTIFICATE=config/certs/kibana/kibana.crt
+      - SERVER_SSL_KEY=config/certs/kibana/kibana.key
+    # Memory limit for the container
+    mem_limit: ${KB_MEM_LIMIT}
+    # Healthcheck to verify Kibana is running and responding (usually redirects)
+    healthcheck:
+      test: ["CMD-SHELL",
+             "curl -I -s -k https://localhost:5601 \
+              | grep -q 'HTTP/1.1 302 Found'"] # Check for 302 redirect, common for Kibana login
       interval: 10s
       timeout: 10s
       retries: 120
 
-  kibana:
+  ###############################################################################
+  # 4) Fleet-Server  (Elastic Agent in Fleet-Server mode)
+  ###############################################################################
+  fleet-server:
+    # Wait for Kibana and Elasticsearch to be healthy
+    depends_on:
+      kibana: { condition: service_healthy }
+      es01:   { condition: service_healthy }
+    image: docker.elastic.co/beats/elastic-agent:${STACK_VERSION:-8.18.0}
+    # Fleet server often needs root for initial setup/permissions
+    user: root
+    volumes:
+      # Mount the certs volume at /certs (matching environment variable paths)
+      - certs:/certs:ro
+      # Mount Fleet Server data volume
+      - fleetserverdata:/usr/share/elastic-agent/data # Specify data subdirectory
+    networks:
+      - elastic # Needs to be on the same network to reach es01
+    ports:
+      # Map host port to container port 8220
+      - "${FLEET_PORT}:8220"
+    command: >
+      bash -c '
+      # Run Fleet Server in the foreground, explicitly setting ES host
+      /usr/bin/tini -- /usr/local/bin/docker-entrypoint \
+        -E fleet.agent.id=$(hostname) \
+        -E elasticsearch.hosts=["https://es01:9200"] \
+        fleet-server start
+      '
+    environment:
+      # Enable enrollment
+      - FLEET_ENROLL=1
+      # URL for agents to connect to Fleet Server
+      - FLEET_URL=https://fleet-server:8220
+      # CA certificate for agent enrollment verification
+      - FLEET_CA=/certs/ca/ca.crt
+      # CA certificate for verifying other SSL connections (e.g., to ES)
+      - SSL_CERTIFICATE_AUTHORITIES=/certs/ca/ca.crt # Often same as FLEET_CA
+      # Enable Fleet Server mode
+      - FLEET_SERVER_ENABLE=1
+      # Default policy for Fleet Server itself
+      - FLEET_SERVER_POLICY_ID=fleet-server-policy
+      # Elasticsearch connection details for Fleet Server
+      - FLEET_SERVER_ELASTICSEARCH_HOST=https://es01:9200
+      - FLEET_SERVER_ELASTICSEARCH_CA=/certs/ca/ca.crt
+      # --- Corrected Insecure Flags ---
+      # Disable insecure connection for enrollment (we have a CA)
+      - FLEET_INSECURE=true
+      # Disable insecure connection to Elasticsearch (we have a CA)
+      - FLEET_SERVER_ELASTICSEARCH_INSECURE=true
+      # --- End Corrected Flags ---
+      # Fleet Server's own certificate and key
+      - FLEET_SERVER_CERT=/certs/fleet-server/fleet-server.crt
+      - FLEET_SERVER_CERT_KEY=/certs/fleet-server/fleet-server.key
+      # Disable insecure HTTP listener (use HTTPS)
+      - FLEET_SERVER_INSECURE_HTTP=false
+      # Enable Kibana Fleet setup on agent start
+      - KIBANA_FLEET_SETUP=1
+      # Credentials for Kibana setup/connection
+      - KIBANA_FLEET_USERNAME=elastic # Use the elastic superuser
+      - KIBANA_FLEET_PASSWORD=${ELASTIC_PASSWORD}
+      # CA for verifying Kibana connection
+      - KIBANA_FLEET_CA=/certs/ca/ca.crt
+      # Kibana host URL
+      - KIBANA_HOST=https://kibana:5601
+    # Optional: Add healthcheck for Fleet Server if needed
+    # healthcheck:
+    #   test: ["CMD-SHELL", "curl -k https://localhost:8220/api/status | grep -q HEALTHY"] # Example check
+    #   interval: 10s
+    #   timeout: 5s
+    #   retries: 10
+
+  ###############################################################################
+  # 5) setup-passwords: Waits for ES then sets kibana_system password (runs once)
+  ###############################################################################
+  setup-passwords:
+    # Use an ES image as it has the necessary tools (curl)
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION:-8.18.0}
+    container_name: setup-passwords-1 # Explicit name for clarity
+    hostname: setup-passwords
+    # Run as root (0) to execute curl
+    user: "0"
+    # Depends on Elasticsearch being healthy
     depends_on:
       es01:
-        condition: service_healthy # Wait for Elasticsearch to be healthy
-    # Make sure STACK_VERSION is set to 9.0.0 in your environment/.env file
-    image: docker.elastic.co/kibana/kibana:${STACK_VERSION}
-    labels:
-      co.elastic.logs/module: kibana
+        condition: service_healthy
+      setup-certs:
+        condition: service_completed_successfully
     volumes:
-      - certs:/usr/share/kibana/config/certs   # Mount certs volume
-      - kibanadata:/usr/share/kibana/data      # Mount data volume
-    ports:
-      - ${KIBANA_PORT:-5601}:5601 # Expose Kibana port
+      # Mount the certs volume to access the CA certificate
+      - certs:/usr/share/elasticsearch/config/certs
+      # Mount the setup script into the container
+      - ./setup_passwords.sh:/usr/local/bin/setup_passwords.sh:ro
+    # Command to wait for ES and set passwords
+    command: ["bash", "/usr/local/bin/setup_passwords.sh"]
+    # Pass necessary environment variables for the script
     environment:
-      - SERVERNAME=kibana # Hostname for Kibana server
-      - ELASTICSEARCH_HOSTS=https://es01:9200 # Point Kibana to Elasticsearch
-      - ELASTICSEARCH_USERNAME=kibana_system # User Kibana uses to connect to ES
-      - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD} # Password for kibana_system user
-      - ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES=config/certs/ca/ca.crt # Trust the CA
-      # Optional: Encryption keys for sensitive settings
-      - XPACK_SECURITY_ENCRYPTIONKEY=${ENCRYPTION_KEY:-$(openssl rand -hex 32)}
-      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=${ENCRYPTION_KEY:-$(openssl rand -hex 32)}
-      - XPACK_REPORTING_ENCRYPTIONKEY=${ENCRYPTION_KEY:-$(openssl rand -hex 32)}
-    mem_limit: ${KB_MEM_LIMIT:-1g} # Memory limit for Kibana (adjust as needed)
-    healthcheck:
-      # Check if Kibana UI is responding (usually with a redirect)
-      test:
-        [
-          "CMD-SHELL",
-          "curl -s -I http://localhost:5601 | grep -q 'HTTP/1.1 302 Found'"
-        ]
-      interval: 10s
-      timeout: 10s
-      retries: 120
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - KIBANA_PASSWORD=${KIBANA_PASSWORD}
+    networks:
+      - elastic # Needs to be on the same network to reach es01

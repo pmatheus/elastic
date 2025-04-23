@@ -1,0 +1,250 @@
+---
+###############################################################################
+# playbook.yml – Deploy / update an Elastic‑Stack (ES + Kibana + Fleet‑Server)
+#   • creates Docker & docker‑compose‑plugin if missing
+#   • creates /opt/elastic-stack and drops every compose artefact there
+#   • generates CA + node certificates in a dedicated “setup” container
+#   • starts   es01  and  kibana, waits until ES answers on :9200
+#   • creates a Fleet enrol‑token, writes it to .env
+#   • finally starts Fleet‑Server (elastic‑agent)
+#
+# Variables live in group_vars/elk.yml (see earlier messages)
+###############################################################################
+
+- name: Deploy / Update Elastic‑Stack on 172.20.20.101
+  hosts: elk               # inventory.ini contains ansible_user=ansible, etc.
+  become: true
+  vars_files:
+    - group_vars/elk.yml   # stack_version, passwords, host_ip, …
+
+  ###########################################################################
+  # ---- PREPARE THE HOST ---------------------------------------------------
+  ###########################################################################
+  pre_tasks:
+    - name: Ensure core apt packages
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+        state: present
+        update_cache: yes
+
+    - name: Install Docker Engine (if absent)
+      ansible.builtin.shell: |
+        curl -fsSL https://get.docker.com | sh
+      args:
+        creates: /usr/bin/docker
+
+    - name: Install docker‑compose‑plugin
+      ansible.builtin.apt:
+        name: docker-compose-plugin
+        state: present
+
+    - name: Install python‑docker SDK for Ansible
+      ansible.builtin.pip:
+        name: docker
+        state: present
+
+  ###########################################################################
+  # ---- RENDER ALL FILES NEEDED BY DOCKER‑COMPOSE --------------------------
+  ###########################################################################
+  tasks:
+    - name: Create root directory
+      ansible.builtin.file:
+        path: "{{ elastic_root }}"   # → /opt/elastic-stack
+        state: directory
+        owner: root
+        mode: "0755"
+
+    - name: Render .env               # passwords, ports, memory limits …
+      ansible.builtin.template:
+        src: .env.j2
+        dest: "{{ elastic_root }}/.env"
+        owner: root
+        mode: "0600"
+
+    - name: Render instances.yml      # SAN list for cert‑util
+      ansible.builtin.template:
+        src: instances.yml.j2
+        dest: "{{ elastic_root }}/instances.yml"
+        owner: root
+        mode: "0644"
+
+    - name: Copy helper script that actually builds the certs
+      ansible.builtin.copy:
+        src: files/setup-certs.sh     # helper content is shown below
+        dest: "{{ elastic_root }}/setup-certs.sh"
+        owner: root
+        mode: "0755"
+
+#    - name: Determine Elastic Agent binary path inside the image
+#      ansible.builtin.shell:
+#        cmd: >
+#          docker run --rm --entrypoint /bin/sh
+#          docker.elastic.co/beats/elastic-agent:{{ stack_version }}
+#          -c "find /usr/share/elastic-agent/data -name elastic-agent -type f -print -quit"
+#      register: agent_binary_path_result
+#      changed_when: false
+#      failed_when: agent_binary_path_result.rc != 0 or agent_binary_path_result.stdout | trim == ""
+#
+#    - name: Set agent binary path fact
+#      ansible.builtin.set_fact:
+#        agent_binary_path: "{{ agent_binary_path_result.stdout | trim }}"
+#
+#    - name: Debug - Show found agent path
+#      ansible.builtin.debug:
+#        var: agent_binary_path
+
+    - name: Render docker‑compose.yml
+      ansible.builtin.template:
+        src: docker-compose.yml.j2    # the template from the previous messages
+        dest: "{{ elastic_root }}/docker-compose.yml"
+        owner: root
+        mode: "0644"
+
+  ###########################################################################
+  # ---- (OPTIONAL) PRE‑PULL IMAGES ----------------------------------------
+  ###########################################################################
+    - name: Pull images once (faster later)
+      community.docker.docker_image:
+        name: "{{ item }}"
+        source: pull
+      loop:
+        - "docker.elastic.co/elasticsearch/elasticsearch:{{ stack_version }}"
+        - "docker.elastic.co/kibana/kibana:{{ stack_version }}"
+        - "docker.elastic.co/beats/elastic-agent:{{ stack_version }}"
+
+  ###########################################################################
+  # ---- 1️⃣  BOOTSTRAP CERTS (if needed) -----------------------------------
+  ###########################################################################
+    - name: Ensure existing stack is down before cert setup
+      community.docker.docker_compose_v2:
+        project_src: "{{ elastic_root }}"
+        state: absent  # Runs 'docker compose down'
+
+    - name: Bootstrap CA & node certs  (runs *only* the setup service)
+      community.docker.docker_compose_v2:
+        project_src: "{{ elastic_root }}"
+        services: ["setup"]
+        pull: never
+        state: present
+
+  ###########################################################################
+  # ---- 2️⃣  START ELASTICSEARCH + KIBANA ----------------------------------
+  ###########################################################################
+    - name: Start Elasticsearch and Kibana
+      community.docker.docker_compose_v2:
+        project_src: "{{ elastic_root }}"
+        services: ["es01", "kibana"]
+        pull: missing
+        state: present
+        remove_orphans: true
+
+    - name: Wait for Elasticsearch to return HTTP 401
+      ansible.builtin.uri:
+        url: "https://{{ host_ip }}:9200"
+        method: GET
+        validate_certs: no
+        status_code: 401
+        return_content: yes
+      register: es_up
+      retries: 30
+      delay: 15
+      until: es_up.status == 401
+      
+    - name: Set kibana_system user password
+      ansible.builtin.uri:
+        url: "https://{{ host_ip }}:9200/_security/user/kibana_system/_password"
+        method: POST
+        user: elastic
+        password: "{{ elastic_password }}"
+        body_format: json
+        body: '{"password":"{{ kibana_password }}"}'
+        status_code: 200
+        validate_certs: no
+      register: set_kb_pass
+      changed_when: false
+
+  ###########################################################################
+  # ---- 3️⃣ CREATE TOKEN & PATCH .env -------------------------------------
+  ###########################################################################
+    - name: Create service account token for Fleet‑Server
+      ansible.builtin.uri:
+        url: "https://{{ host_ip }}:9200/_security/service/elastic/fleet-server/credential/token/ansible-token"
+        method: POST
+        user: elastic
+        password: "{{ elastic_password }}"
+        status_code: [200,201,409]    # allow ‘already exists’ (409)
+        validate_certs: no
+        return_content: yes
+      register: fleet_token_raw
+      no_log: true
+      changed_when: fleet_token_raw.status in [200,201]
+      failed_when: fleet_token_raw.status not in [200,201,409]
+
+    - name: Read existing enrolment token from .env if token already exists
+      ansible.builtin.shell: >
+        grep '^FLEET_ENROLL_TOKEN=' {{ elastic_root }}/.env | cut -d'=' -f2
+      register: existing_fleet_token
+      changed_when: false
+      when: fleet_token_raw.status == 409
+
+    - name: Set fleet_enrol_token fact
+      ansible.builtin.set_fact:
+        fleet_enrol_token: >-
+          {{ fleet_token_raw.json.token
+            if fleet_token_raw.status in [200,201]
+            else existing_fleet_token.stdout }}
+
+    - name: Inject token into .env
+      ansible.builtin.lineinfile:
+        path: "{{ elastic_root }}/.env"
+        regexp: '^FLEET_ENROLL_TOKEN='
+        line: "FLEET_ENROLL_TOKEN={{ fleet_enrol_token }}"
+        insertafter: EOF
+        
+    - name: Inject service token into .env
+      ansible.builtin.lineinfile:
+        path: "{{ elastic_root }}/.env"
+        regexp: '^FLEET_SERVER_SERVICE_TOKEN='
+        line: "FLEET_SERVER_SERVICE_TOKEN={{ fleet_enrol_token }}"
+        insertafter: EOF
+
+
+  ###########################################################################
+  # ---- 4️⃣  START FLEET‑SERVER --------------------------------------------
+  ###########################################################################
+    - name: Start / Update Fleet‑Server
+      community.docker.docker_compose_v2:
+        project_src: "{{ elastic_root }}"
+        env_files:
+          - "{{ elastic_root }}/.env"
+        services: ["fleetserver"]
+        pull: missing
+        state: present
+
+    - name: Wait for Fleet‑Server health
+      ansible.builtin.uri:
+        url: "https://{{ host_ip }}:{{ fleet_port | default('8220') }}/api/status"
+        method: GET
+        user: kibana_system
+        password: "{{ kibana_password }}"
+        validate_certs: no
+        status_code: 200
+      register: fleet_status
+      retries: 20
+      delay: 10
+      until: fleet_status.json.isInitialized | default(false)
+
+  ###########################################################################
+  # ---- DONE – show URLs ---------------------------------------------------
+  ###########################################################################
+  post_tasks:
+    - name: Show access URLs
+      ansible.builtin.debug:
+        msg: |
+          🔗 Elasticsearch : https://{{ host_ip }}:9200  (user: elastic / {{ elastic_password }})
+          🔗 Kibana        : https://{{ host_ip }}:5601  (user: elastic / {{ elastic_password }})
+          🔗 Fleet‑Server  : https://{{ host_ip }}:8220
