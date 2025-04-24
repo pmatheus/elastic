@@ -39,7 +39,7 @@ if [ ! -f ${CERTS_DIR}/certs.zip ]; then
 instances:
   - name: es01
     dns: [ "es01", "localhost" ]
-    ip:  [ "127.0.0.1" ]
+    ip:  [ "127.0.0.1", "172.20.20.101" ]
   - name: kibana
     dns: [ "kibana", "localhost" ]
     ip:  [ "127.0.0.1", "172.20.20.101" ]
