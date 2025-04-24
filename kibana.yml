@@ -1,13 +1,9 @@
 server.host: "0.0.0.0"
-telemetry.enabled: "true"
+telemetry.enabled: "false"
 xpack.fleet.packages:
   - name: fleet_server
     version: latest
-  - name: system
-    version: latest
   - name: elastic_agent
-    version: latest
-  - name: apm
     version: latest
 xpack.fleet.agentPolicies:
   - name: Fleet-Server-Policy
@@ -26,3 +22,4 @@ xpack.fleet.agentPolicies:
       - name: elastic_agent-1
         package:
           name: elastic_agent
+

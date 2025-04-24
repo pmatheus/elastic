@@ -43,3 +43,34 @@ do
 done
 
 echo "[setup-passwords] ✅ kibana_system password set successfully"
+
+echo "[setup-passwords] ▶ Generating Fleet Server service token..."
+TOKEN_FILE="${CERTS_DIR}/fleet_token.txt"
+TOKEN_NAME="fleet-docker-token-$(date +%s)" # Unique name
+
+# Loop until token generation is successful
+until curl -s --cacert ${CERTS_DIR}/ca/ca.crt \
+      -u "elastic:${ELASTIC_PASSWORD}" \
+      -X POST "https://es01:9200/_security/service/elastic/fleet-server/credential/token/${TOKEN_NAME}" \
+      -o /tmp/token_response.json --fail # Check for HTTP success
+do
+  echo "[setup-passwords] Failed to generate Fleet service token (es01 might still be initializing), retrying in 5 seconds..."
+  sleep 5
+done
+
+# Extract the token using sed (more robust than grep/cut for this)
+# TOKEN_VALUE=$(grep -o '"value":"[^"]*"' /tmp/token_response.json | cut -d'"' -f4)
+TOKEN_VALUE=$(sed -n 's/.*"value":"\([^"]*\)".*/\1/p' /tmp/token_response.json)
+
+if [ -z "$TOKEN_VALUE" ]; then
+  echo "[setup-passwords] ❌ ERROR: Could not extract token from response:" >&2
+  cat /tmp/token_response.json >&2
+  exit 1
+fi
+
+echo "[setup-passwords] ▶ Writing token to ${TOKEN_FILE}"
+echo -n "${TOKEN_VALUE}" > "${TOKEN_FILE}"
+
+rm /tmp/token_response.json # Clean up
+
+echo "[setup-passwords] ✅ Fleet Server service token generated and saved."
