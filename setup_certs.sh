@@ -42,10 +42,10 @@ instances:
     ip:  [ "127.0.0.1" ]
   - name: kibana
     dns: [ "kibana", "localhost" ]
-    ip:  [ "127.0.0.1" ]
+    ip:  [ "127.0.0.1", "172.20.20.101" ]
   - name: fleet-server
     dns: [ "fleet-server", "localhost" ]
-    ip:  [ "127.0.0.1" ]
+    ip:  [ "127.0.0.1", "172.20.20.101" ]
 EOF
   # Use elasticsearch-certutil to create certs based on instances.yml and the CA
   bin/elasticsearch-certutil cert --silent --pem \
