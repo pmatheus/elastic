@@ -12,11 +12,6 @@ volumes:
   fleetserverdata: {}
 
 networks:
-  # Default network for the Elastic stack
-  default:
-    name: elastic
-    # Not external, managed by Docker Compose
-
   # Network Definition
   elastic:
     driver: bridge
