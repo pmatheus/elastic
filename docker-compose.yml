@@ -180,7 +180,7 @@ services:
       # Enable enrollment
       - FLEET_ENROLL=1
       # URL for agents to connect to Fleet Server
-      - FLEET_URL=https://fleet-server:8220
+      - FLEET_URL=https://172.20.20.101:8220
       # CA certificate for agent enrollment verification
       - FLEET_CA=/certs/ca/ca.crt
       # CA certificate for verifying other SSL connections (e.g., to ES)
@@ -194,9 +194,9 @@ services:
       - FLEET_SERVER_ELASTICSEARCH_CA=/certs/ca/ca.crt
       # --- Corrected Insecure Flags ---
       # Disable insecure connection for enrollment (we have a CA)
-      - FLEET_INSECURE=true
+      - FLEET_INSECURE=false
       # Disable insecure connection to Elasticsearch (we have a CA)
-      - FLEET_SERVER_ELASTICSEARCH_INSECURE=true
+      - FLEET_SERVER_ELASTICSEARCH_INSECURE=false
       # --- End Corrected Flags ---
       # Fleet Server's own certificate and key
       - FLEET_SERVER_CERT=/certs/fleet-server/fleet-server.crt
