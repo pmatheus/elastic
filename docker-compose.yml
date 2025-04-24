@@ -34,6 +34,8 @@ services:
       - certs:/usr/share/elasticsearch/config/certs
       # Mount the setup script into the container
       - ./setup_certs.sh:/usr/local/bin/setup_certs.sh:ro
+    networks:
+      - elastic
     # Command to generate certs and permissions - now executes the script
     command: ["bash", "/usr/local/bin/setup_certs.sh"]
     # Pass necessary environment variables for the script
