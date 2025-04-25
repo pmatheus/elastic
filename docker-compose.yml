@@ -129,7 +129,7 @@ services:
       # Corrected variable name: SERVER_NAME
       - SERVER_NAME=kibana
       # Elasticsearch hosts Kibana connects to
-      - ELASTICSEARCH_HOSTS=https://es01:9200
+      - ELASTICSEARCH_HOSTS=https://172.20.20.101:9200
       # Credentials for Kibana's internal user
       - ELASTICSEARCH_USERNAME=kibana_system
       - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD}
@@ -156,13 +156,15 @@ services:
       retries: 120
 
   ###############################################################################
-  # 4) Fleet-Server  (Elastic Agent in Fleet-Server mode)
+  # 4) Fleet Server  (Elastic Agent in Fleet Server mode)
   ###############################################################################
   fleet-server:
-    # Wait for Kibana and Elasticsearch to be healthy
+    # Wait for setup-fleet (which waits for Kibana) and ES to be healthy
     depends_on:
-      kibana: { condition: service_healthy }
-      es01:   { condition: service_healthy }
+      setup-fleet: 
+        condition: service_completed_successfully
+      es01:
+        condition: service_healthy
     image: docker.elastic.co/beats/elastic-agent:${STACK_VERSION:-8.18.0}
     # Fleet server often needs root for initial setup/permissions
     user: root
@@ -192,6 +194,8 @@ services:
       # Elasticsearch connection details for Fleet Server
       - FLEET_SERVER_ELASTICSEARCH_HOST=https://es01:9200
       - FLEET_SERVER_ELASTICSEARCH_CA=/certs/ca/ca.crt
+      # --- Path to Service Token --- 
+      - FLEET_SERVER_SERVICE_TOKEN_PATH=/certs/fleet_token.txt
       # --- Corrected Insecure Flags ---
       # Disable insecure connection for enrollment (we have a CA)
       - FLEET_INSECURE=false
@@ -248,3 +252,25 @@ services:
       - KIBANA_PASSWORD=${KIBANA_PASSWORD}
     networks:
       - elastic # Needs to be on the same network to reach es01
+
+  ###############################################################################
+  # 6) setup-fleet: Waits for Kibana, creates policy, generates service token
+  ###############################################################################
+  setup-fleet:
+    # Use Kibana image as it has curl and correct cert paths
+    image: docker.elastic.co/kibana/kibana:${STACK_VERSION:-8.18.0}
+    # Run commands as root user for script execution
+    user: "0"
+    depends_on:
+      kibana:
+        condition: service_healthy
+      es01: # Also needs ES to be healthy for token generation
+        condition: service_healthy
+    volumes:
+      - certs:/usr/share/kibana/config/certs # Needs certs volume (adjust path)
+      - ./setup_fleet.sh:/usr/local/bin/setup_fleet.sh:ro
+    networks:
+      - elastic
+    command: ["bash", "/usr/local/bin/setup_fleet.sh"]
+    environment:
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
