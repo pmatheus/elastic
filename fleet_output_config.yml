@@ -1,8 +1,0 @@
-outputs:
-  default:
-    type: elasticsearch
-    hosts: ["https://es01:9200"]
-    ssl.certificate_authorities: ["/certs/ca/ca.crt"]
-    # The agent process will substitute this environment variable
-    # after it's exported by the entrypoint script.
-    service_token: ${FLEET_SERVER_SERVICE_TOKEN} 
